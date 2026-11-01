@@ -2510,6 +2510,31 @@ export interface TestMcpServerResponse {
   tools: CachedMcpToolSummary[];
 }
 
+export interface McpRegistryRemoteHeader {
+  description?: string;
+  isRequired?: boolean;
+  isSecret?: boolean;
+  name: string;
+  value?: string;
+}
+
+export interface McpRegistryRemote {
+  headers?: McpRegistryRemoteHeader[];
+  type: string;
+  url: string;
+}
+
+export interface McpRegistryServer {
+  description?: string;
+  name: string;
+  remotes: McpRegistryRemote[];
+  transport: string;
+}
+
+export interface McpRegistrySearchResponse {
+  servers: McpRegistryServer[];
+}
+
 export interface ToolSummary {
   description: string;
   handlerType: string;
