@@ -471,24 +471,8 @@ const SHARED_HISTORY_CHANNELS: readonly AgentChannel[] = [
   "whatsapp",
 ];
 
-/**
- * Any other chat belongs to the user who started it. Platform admins may open
- * any chat for support; everyone else gets the same 404 as a missing session,
- * so holding another user's session id reveals nothing.
- */
-function assertSessionOwner(
-  record: StoredSessionRecord,
-  access: ChatProfileAccess
-): void {
-  if (
-    access.isPlatformAdmin ||
-    SHARED_HISTORY_CHANNELS.some((channel) => channel === record.channel) ||
-    (access.user && record.userId === access.user.id)
-  ) {
-    return;
-  }
-
-  throw new NakamaApiError("Session not found", 404);
+function isSharedHistory(record: StoredSessionRecord): boolean {
+  return SHARED_HISTORY_CHANNELS.some((channel) => channel === record.channel);
 }
 
 export class AgentService {
@@ -2651,15 +2635,7 @@ export class AgentService {
       );
     }
 
-    if (
-      (await this.db.listChildSessions(parentSessionId)).length >=
-      MAX_CHILD_SESSIONS
-    ) {
-      throw new NakamaApiError(
-        `This chat already started ${MAX_CHILD_SESSIONS} chats.`,
-        400
-      );
-    }
+    await this.assertChildSessionRoom(parentSessionId);
 
     const inherited = inheritFrom(parent, "child");
 
@@ -2681,6 +2657,61 @@ export class AgentService {
     );
   }
 
+  /**
+   * Branches and closed chats do not count: the cap is on open sub_agent
+   * chats, so a closed one must also fit before it opens again.
+   */
+  private async assertChildSessionRoom(parentSessionId: string): Promise<void> {
+    const openChildren = (
+      await this.db.listChildSessions(parentSessionId)
+    ).filter((child) => sessionKind(child) === "child" && !child.closedAt);
+
+    if (openChildren.length >= MAX_CHILD_SESSIONS) {
+      throw new NakamaApiError(
+        `This chat already has ${MAX_CHILD_SESSIONS} open chats.`,
+        400
+      );
+    }
+  }
+
+  /**
+   * Any other chat belongs to the user who started it. A chat that sub_agent
+   * started under a shared chat is shared too, though it is a web chat.
+   * Platform admins may open any chat for support; everyone else gets the
+   * same 404 as a missing session, so holding another user's session id
+   * reveals nothing.
+   */
+  private async assertSessionOwner(
+    record: StoredSessionRecord,
+    access: ChatProfileAccess
+  ): Promise<void> {
+    if (
+      access.isPlatformAdmin ||
+      isSharedHistory(record) ||
+      (access.user && record.userId === access.user.id)
+    ) {
+      return;
+    }
+
+    if (await this.isChildOfSharedChat(record)) {
+      return;
+    }
+
+    throw new NakamaApiError("Session not found", 404);
+  }
+
+  /** The caller already scoped `record` to the org; its parent is in it too. */
+  private async isChildOfSharedChat(
+    record: StoredSessionRecord
+  ): Promise<boolean> {
+    const parent =
+      record.parentSessionId && sessionKind(record) === "child"
+        ? await this.db.getSession(record.parentSessionId)
+        : null;
+
+    return parent !== null && isSharedHistory(parent);
+  }
+
   async assertSessionProfileAccess(
     sessionId: string,
     orgId: string,
@@ -2695,7 +2726,7 @@ export class AgentService {
         await this.requireProfile(orgId, record.profileId),
         access
       );
-      assertSessionOwner(record, access);
+      await this.assertSessionOwner(record, access);
 
       // Only the local CLI can set this folder, so only it can run tools there.
       if (options.localClient === false && record.codingWorkspaceRoot) {
@@ -2735,7 +2766,7 @@ export class AgentService {
       return null;
     }
 
-    assertSessionOwner(sessionRecord, access);
+    await this.assertSessionOwner(sessionRecord, access);
 
     return createAttachmentLoader(this.db, {
       orgId,
@@ -2924,10 +2955,15 @@ export class AgentService {
     };
   }
 
+  /**
+   * A branch belongs to the user who made it, so it shows in their Recents
+   * even when the chat it came from belongs to someone else.
+   */
   async branchSession(
     sessionId: string,
     messageIndex: number,
-    orgId: string
+    orgId: string,
+    userId?: string
   ): Promise<BranchSessionResponse | null> {
     const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
@@ -2964,6 +3000,7 @@ export class AgentService {
       id: nextSessionId,
       parentSessionId: sessionId,
       title: null,
+      userId: userId ?? record.userId ?? null,
     };
 
     await this.db.upsertSession(branchRecord);
@@ -3094,6 +3131,15 @@ export class AgentService {
       return true;
     }
 
+    // Chats sub_agent started here go with it, as on close. Left behind, they
+    // lose their parent and with it the sharing a shared parent gives them.
+    // A branch stays: it is its own chat.
+    for (const child of await this.db.listChildSessions(sessionId)) {
+      if (sessionKind(child) === "child") {
+        await this.purgeSession(child.id, orgId);
+      }
+    }
+
     discardInFlightSessionWrites(sessionId);
     await this.sessions.end(sessionId);
     this.superNakamaSessionState.clearSession(sessionId);
@@ -3219,11 +3265,14 @@ export class AgentService {
 
     // Everyone on the agent can read a messaging-app chat, but stopping its
     // turn hits the person who started it, so closing needs the owner or an admin.
+    // A sub_agent chat under it is a web chat in every member's Recents, so
+    // any member may close that one.
     if (
       !(
         access.isPlatformAdmin ||
         access.orgRole === "admin" ||
-        (access.user && record.userId === access.user.id)
+        (access.user && record.userId === access.user.id) ||
+        (await this.isChildOfSharedChat(record))
       )
     ) {
       throw new NakamaApiError("Session not found", 404);
@@ -3284,7 +3333,19 @@ export class AgentService {
   async detachSession(sessionId: string, orgId: string): Promise<boolean> {
     const record = await this.getSessionRecordForOrg(sessionId, orgId);
 
-    return record ? this.db.updateSessionParent(sessionId, null) : false;
+    if (!record) {
+      return false;
+    }
+
+    // Its parent is what shares it; without one, members lose it.
+    if (await this.isChildOfSharedChat(record)) {
+      throw new NakamaApiError(
+        "A chat started from a shared chat cannot leave it.",
+        400
+      );
+    }
+
+    return this.db.updateSessionParent(sessionId, null);
   }
 
   async setSessionOrder(
@@ -3321,6 +3382,10 @@ export class AgentService {
     orgId: string
   ): Promise<void> {
     if (record.closedAt) {
+      if (record.parentSessionId && sessionKind(record) === "child") {
+        await this.assertChildSessionRoom(record.parentSessionId);
+      }
+
       await this.db.updateSessionClosedAt(record.id, null);
     }
 
