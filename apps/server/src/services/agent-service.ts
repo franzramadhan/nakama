@@ -154,6 +154,7 @@ import {
   deleteArtifactFile,
   deleteAttachmentBytes,
   extractImageParts,
+  findCustomModel,
   findProviderInstance,
   getActiveProviderInstance,
   getProfileSoulDir,
@@ -254,11 +255,14 @@ import {
   createProviderFromActiveConfig,
   fetchCloudflareWorkersAiModels,
   fetchFireworksGatewayModels,
+  fetchNetraModelLimits,
   fetchNetraModels,
   fetchOllamaModels,
   fetchRemoteOpenAIModels,
   getModelsForProviderInstance,
   isCostEstimated,
+  NETRA_MAX_OUTPUT_TOKENS,
+  readApiKeyForInstance,
   resolveModelLimits,
 } from "../providers";
 import {
@@ -6144,6 +6148,20 @@ export class AgentService {
     await this.ensureVisionSettingsLoaded();
     const profile = await this.requireExecutionProfile(orgId, profileId);
 
+    const selectedModel = modelOverride
+      ? this.normalizeSessionModelOverride(modelOverride)
+      : profile.model;
+
+    // Netra limits come from a network lookup, so start it now and let it
+    // run while the tools, prompt, and history load.
+    const compactionLookup = this.resolveCompactionConfig(
+      profile,
+      selectedModel
+    );
+
+    // Keep a failure for the await below, not as an unhandled rejection.
+    compactionLookup.catch(() => undefined);
+
     // A stored CLI folder can be moved or deleted after the chat started.
     // Then the chat goes back to the profile workspace.
     const { codingWorkspaceRoot } = record;
@@ -6219,11 +6237,7 @@ export class AgentService {
     const userTimezone = await this.getUserTimezone();
     const userContext = await this.loadUserContextForUser(orgId, userId);
 
-    const selectedModel = modelOverride
-      ? this.normalizeSessionModelOverride(modelOverride)
-      : profile.model;
-
-    const compaction = this.resolveCompactionConfig(profile, selectedModel);
+    const compaction = await compactionLookup;
 
     const workspaceThinking = this.resolveWorkspaceThinkingDefaults();
 
@@ -6881,10 +6895,10 @@ export class AgentService {
     throw new Error("No profile available for playground execution.");
   }
 
-  private resolveCompactionConfig(
+  private async resolveCompactionConfig(
     profile: StoredProfileRecord,
     selectedModel: string | null = profile.model
-  ): CompactionConfig | undefined {
+  ): Promise<CompactionConfig | undefined> {
     // An ACP agent cannot write the summary that compaction asks a provider for.
     if (profile.acpAgent) {
       return;
@@ -6900,11 +6914,35 @@ export class AgentService {
       return;
     }
 
-    return resolveModelLimits(
-      resolved.instance.type,
-      resolved.model,
-      resolved.instance.customModels
+    const { instance, model } = resolved;
+
+    const limits = resolveModelLimits(
+      instance.type,
+      model,
+      instance.customModels
     );
+
+    if (instance.type !== "netra") {
+      return limits;
+    }
+
+    // Netra is not in the static catalog. A limit saved on the model wins,
+    // then the one Netra reports, so compaction matches the real window.
+    const saved = findCustomModel(instance.customModels, model);
+
+    const reported = await fetchNetraModelLimits(
+      readApiKeyForInstance(instance, process.env) ?? "",
+      model
+    );
+
+    return {
+      contextWindow:
+        saved?.contextWindow ?? reported.contextWindow ?? limits.contextWindow,
+      maxOutputTokens:
+        saved?.maxOutputTokens ??
+        reported.maxOutputTokens ??
+        NETRA_MAX_OUTPUT_TOKENS,
+    };
   }
 
   private resolveWorkspaceThinkingDefaults(): ThinkingSettings {
