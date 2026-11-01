@@ -224,6 +224,24 @@ describe("ensureBundledSkillFiles", () => {
     ).toBe(await readBundledSkillMarkdown("artifact-design"));
   });
 
+  test("installs the slide deck template beside the skill", async () => {
+    await ensureBundledSkillFiles();
+
+    const template = await readFile(
+      join(
+        configDir,
+        "agent",
+        "skills",
+        "slide-deck-design",
+        "assets",
+        "deck.html"
+      ),
+      "utf8"
+    );
+
+    expect(template).toContain('class="slide"');
+  });
+
   test("refreshes an installed memory archive skill on startup", async () => {
     const directory = join(
       configDir,

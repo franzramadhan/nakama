@@ -282,7 +282,8 @@ Profiles receive bundled skills for common workflows:
 - `manage-skills` — create, patch, edit, and delete profile-scoped skills (and supporting files under a skill directory) with the `skill_manage` tool (file tools still inspect skills; they cannot write under `skills/*/` when `skill_manage` is present)
 - `update-profile-memory` — record facts in active `MEMORY.md` via file tools
 - `archive-profile-memory` — move facts from active `MEMORY.md` into `memory-archive/` without deleting them
-- `artifact-design` — design rules for the HTML pages, dashboards, and slide decks the agent saves under `artifacts/`
+- `artifact-design` — design rules for the HTML pages, reports, and dashboards the agent saves under `artifacts/`
+- `slide-deck-design` — a tested deck template: one 16:9 slide at a time on screen and one slide per page in PDF
 - `nakama-guide` — a map of the Nakama web app, so the agent can tell users which page holds a setting and who can change it
 - `coding-agent` — invoke a coding agent for repo work via `bash` (Super Nakama by default; see [Coding agent](/coding-agent))
 - `agent-browser` — interactive browser automation via `bash` (opt-in; see [Agent browser](/agent-browser))
@@ -389,7 +390,7 @@ Skill management is a platform-admin operation in the dashboard and API.
 - Use **`archive-profile-memory`** when the user wants to forget, tidy, or free space in active memory without deleting history
 - Use the **main profile prompt** for always-on behavior and identity
 - Use a **builtin tool** for a native capability like web search or file access
-- Use **`save_artifact`** or **`write_docx`** when the agent should save a file for you (reports, summaries, generated text, Word documents) under `artifacts/`; **`artifact-design`** sets how HTML pages, dashboards, and decks look
+- Use **`save_artifact`** or **`write_docx`** when the agent should save a file for you (reports, summaries, generated text, Word documents) under `artifacts/`; **`artifact-design`** sets how HTML pages and dashboards look, and **`slide-deck-design`** builds decks
 - Use **`coding-agent`** with **`bash`** when repo work is better handled by a dedicated coding agent ([setup](/coding-agent))
 - Use **`agent-browser`** with **`bash`** for login walls, forms, and interactive browsing ([setup](/agent-browser))
 - Use an **MCP server** for external tool integrations
